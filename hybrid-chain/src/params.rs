@@ -1,0 +1,36 @@
+/// Global chain parameters — edit these to configure your coin.
+pub struct ChainParams {
+    pub name: &'static str,
+    pub ticker: &'static str,
+    pub max_supply: u64,
+    pub pow_block_reward: u64,
+    pub pos_annual_rate: f64,
+    pub min_stake: u64,
+    pub pow_target_block_time: u64,
+    pub pos_target_block_time: u64,
+    pub difficulty_adjustment_window: u64,
+    pub coin_maturity: u64,
+    pub pos_coin_age_min: u64,
+    pub pos_coin_age_max: u64,
+    pub initial_difficulty: u32,
+    pub genesis_timestamp: i64,
+    pub genesis_message: &'static str,
+}
+
+pub const CHAIN_PARAMS: ChainParams = ChainParams {
+    name: "Orthal",
+    ticker: "ORTH",
+    max_supply: 21_000_000,
+    pow_block_reward: 50_0000_0000,
+    pos_annual_rate: 0.05,
+    min_stake: 100_0000_0000,
+    pow_target_block_time: 120,
+    pos_target_block_time: 60,
+    difficulty_adjustment_window: 2016,
+    coin_maturity: 100,
+    pos_coin_age_min: 86400,
+    pos_coin_age_max: 86400 * 90,
+    initial_difficulty: 12,
+    genesis_timestamp: 1748996400,
+    genesis_message: "Orthal genesis — coined value, compact notes",
+};

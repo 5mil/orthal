@@ -32,5 +32,5 @@ pub const CHAIN_PARAMS: ChainParams = ChainParams {
     pos_coin_age_max: 86400 * 90,
     initial_difficulty: 12,
     genesis_timestamp: 1748996400,
-    genesis_message: "Orthal genesis — coined value, compact notes",
+    genesis_message: "Orthal genesis — compact notes, native ORTH",
 };

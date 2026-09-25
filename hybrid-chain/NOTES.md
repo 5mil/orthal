@@ -1,8 +1,8 @@
-# Living-set notes (`dev`)
+# Living-set notes
 
-- ImageOr covers every live leaf. The spend does not list a ring. `sample_ring` is gone.
-- Conservation is BindingSig: ΣC = rH with r ≠ 0.
-- Consensus calls NoteProof.verify with every real output, not outs.first().
-- mine_pow_block(wallet_seed) derives dest from that seed. Ticket ≠ seed.
-- Emission pad dest comes from the emission opening r.
-- Range proofs are still a 48-bit sigma. That is not Bulletproofs.
+- Native ticker is ORTH. Issued tickers are notes with a public asset id.
+- Asset id is H(symbol). A name cannot be reissued. ORTH is reserved.
+- Curve: tokens_out = rem * q_in / (virtual + raised + q_in). State on the inventory note.
+- Birth is issuance, not coinbase. Team slice uses After.
+- Listed preds include curve and ticker. Unknown id fails.
+- Conservation is BindingSig: residual r ≠ 0.

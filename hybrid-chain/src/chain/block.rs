@@ -3,10 +3,7 @@ use crate::consensus::pow::sha256d;
 use crate::notes::action::ActionBundle;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum BlockType {
-    PoW,
-    PoS,
-}
+pub enum BlockType { PoW, PoS }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
@@ -33,24 +30,16 @@ impl Block {
     pub fn hash(&self) -> [u8; 32] {
         sha256d(&bincode::serialize(&self.header).unwrap_or_default())
     }
-
     pub fn compute_merkle_root(bundles: &[ActionBundle]) -> [u8; 32] {
-        if bundles.is_empty() {
-            return [0u8; 32];
-        }
+        if bundles.is_empty() { return [0u8; 32]; }
         let mut hashes: Vec<[u8; 32]> = bundles.iter().map(|b| b.id()).collect();
         while hashes.len() > 1 {
-            if hashes.len() % 2 != 0 {
-                hashes.push(*hashes.last().unwrap());
-            }
-            hashes = hashes
-                .chunks(2)
-                .map(|pair| {
-                    let mut c = pair[0].to_vec();
-                    c.extend_from_slice(&pair[1]);
-                    sha256d(&c)
-                })
-                .collect();
+            if hashes.len() % 2 != 0 { hashes.push(*hashes.last().unwrap()); }
+            hashes = hashes.chunks(2).map(|pair| {
+                let mut c = pair[0].to_vec();
+                c.extend_from_slice(&pair[1]);
+                sha256d(&c)
+            }).collect();
         }
         hashes[0]
     }

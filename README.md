@@ -1,17 +1,21 @@
 # Orthal
 
-**Orthal** is a coined name for value. It is not a living word in English or another language.
-It is built from Old English *weorþ* (“worth, value”) plus a closed suffix so the form does not collide with *worth*, *Wert*, *waard*, *valor*, or *valeur*.
+**Repo:** [github.com/5mil/orthal](https://github.com/5mil/orthal) (`main`)
+**Crate:** [`hybrid-chain`](hybrid-chain/)
+**Ticker:** ORTH
+**Integration source:** [5mil/solana:dev](https://github.com/5mil/solana/tree/dev)
 
-This repository is the hybrid-chain notes node taken from [`5mil/solana`](https://github.com/5mil/solana) branch `dev` at [`4388c3a`](https://github.com/5mil/solana/commit/4388c3a7c168967d732771af0dd10e3a676556a3), published here as **`main`**.
+Orthal is a hybrid SHA256d PoW / coin-age PoS chain. Transfers, miner
+payouts, issued tickers, and predicate programs share one compact action
+bundle. There is no token-factory VM.
 
-The full Solana monorepo remains at `5mil/solana`. This tree is the compact-note chain that work targeted.
+Start here: **[hybrid-chain/README.md](hybrid-chain/README.md)**
 
-## Crate
-
+```text
+mine ORTH → birth a unique ticker → trade the curve → graduate to an LP note
 ```
-cd hybrid-chain
-cargo test --all-targets
-```
 
-See `hybrid-chain/NOTES.md`.
+- Symbols are unique forever. Asset id is `H(symbol)`. `ORTH` is reserved.
+- Programs are listed predicates (`Pk`, `After`, `PkN`, `Curve`, `Swap`, …).
+  Unknown ids fail closed.
+- Persistence: `--data DIR` then `--replay`. A tampered file does not load.

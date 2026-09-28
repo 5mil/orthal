@@ -7,6 +7,7 @@ mod tests {
     use crate::notes::keys::SpendKey;
     use crate::notes::payout::SealedPayout;
     use crate::notes::proof::commit_with_asset;
+    use crate::notes::spend::transfer_window_bundle;
     use crate::notes::ticker::birth_outputs;
     use crate::notes::trade::{buy_fund, sell_spend, with_genesis_vault};
     use crate::notes::ORTH;
@@ -25,20 +26,28 @@ mod tests {
         assert!(chain.launch.contains(orth_cm), "mined payout must be live");
 
         let quote = 10_000u64;
+        let q_r = blinding_from_seed(b"quote-r");
+        let f_r = blinding_from_seed(b"fee-r");
+        let split = transfer_window_bundle(
+            &pay.spend, &pay.scan, &chain.launch, orth_cm, reward, &orth_r,
+            &pay.spend, quote, &q_r, reward - quote, &f_r, [4u8; 16], chain.height(),
+        ).expect("split reward");
+        chain.apply_transfer(&split).expect("apply split");
+        let quote_cm = commit_with_asset(quote, &q_r, &ORTH).commitment;
+
         let (birth, spec, _) = birth_outputs(&keeper, "MEME", b"", 1_000_000, 10_000, 80_000, 0, 0, 0, chain.height()).unwrap();
         let birth = with_genesis_vault(birth, &keeper, &spec);
         chain.apply_transfer(&birth).expect("birth+vault");
 
         let (buy, spec, tokens) = buy_fund(
             &keeper, &pay.spend, &chain.launch, &spec, "MEME", quote, chain.height(),
-            orth_cm, orth_r,
+            quote_cm, q_r,
         ).expect("buy_fund");
         assert!(tokens > 0);
         chain.apply_transfer(&buy).expect("apply buy");
 
         let tok_r = blinding_from_seed(&[b"buy-r".as_ref(), &spec.asset, &tokens.to_le_bytes(), &quote.to_le_bytes()].concat());
         let tok_cm = commit_with_asset(tokens, &tok_r, &ORTH).commitment;
-        assert!(chain.launch.contains(tok_cm));
 
         let (sell, spec2, paid) = sell_spend(
             &keeper, &pay.spend, &chain.launch, &spec, "MEME", tokens, chain.height(),

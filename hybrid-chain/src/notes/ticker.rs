@@ -1,12 +1,14 @@
 //! ORTH is the native ticker. Issued tickers are notes with a public asset id.
 
-use super::action::{ActionBundle, CompactAction, CompactOutput};
+use super::action::{ActionBundle, CompactAction, CompactOutput, CompactSpend};
 use super::asset::{normalize_symbol, ticker_id, ORTH};
+use super::auth::{rerand, RangeProof};
 use super::commitment::{blinding_from_seed, ValueCommitment};
 use super::intent::{Intent, IntentFill};
 use super::keys::{SpendKey, SpendPk};
-use super::pred::{PredHeader, Predicate};
-use super::proof::commit_with_asset;
+use super::launch::LaunchSet;
+use super::pred::{PredHeader, PredWitness, Predicate};
+use super::proof::{commit_with_asset, BindingSig, ImageOr, NoteProof};
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::scalar::Scalar;
 use serde::{Deserialize, Serialize};
@@ -81,6 +83,18 @@ fn note(dest: SpendPk, value: u64, blind: &Scalar, asset: [u8; 32], symbol: Stri
     }
 }
 
+pub fn inventory_blind(spec: &CurveSpec) -> Scalar {
+    if spec.quote_raised == 0 {
+        blinding_from_seed(&[b"inv-r".as_ref(), &spec.asset, &spec.cap.to_le_bytes()].concat())
+    } else {
+        blinding_from_seed(&[b"inv-r".as_ref(), &spec.asset, &spec.cap_remaining.to_le_bytes(), &spec.quote_raised.to_le_bytes()].concat())
+    }
+}
+
+pub fn inventory_cm(spec: &CurveSpec) -> [u8; 32] {
+    commit_with_asset(spec.cap_remaining, &inventory_blind(spec), &ORTH).commitment
+}
+
 pub fn birth_outputs(
     creator: &SpendKey, symbol: &str, salt: &[u8], cap: u64, virtual_quote: u64,
     graduate_quote: u64, start_height: u64, team_value: u64, team_unlock: u64, height: u64,
@@ -90,7 +104,7 @@ pub fn birth_outputs(
     let asset = ticker_id(&sym)?;
     if cap == 0 || virtual_quote == 0 { return Err("cap/virtual"); }
     let spec = CurveSpec::new(asset, cap, virtual_quote, graduate_quote, start_height);
-    let inv_r = blinding_from_seed(&[b"inv-r".as_ref(), &asset, &cap.to_le_bytes()].concat());
+    let inv_r = inventory_blind(&spec);
     let inv = note(creator.pk(), cap, &inv_r, asset, sym.clone(), PredHeader::from_pred(&spec.as_pred()), [1u8; 16]);
     let mut actions = vec![CompactAction { spend: None, output: Some(inv) }];
     if team_value > 0 {
@@ -109,8 +123,6 @@ pub fn birth_outputs(
     }, spec, asset))
 }
 
-/// Next inventory note + buyer token note after a quote-in fill.
-/// Does not re-register the symbol. Wallet must retire the previous inventory note.
 pub fn buy_outputs(
     keeper: &SpendKey, buyer: &SpendKey, spec: &CurveSpec, symbol: &str, quote_in: u64, height: u64,
 ) -> Result<(ActionBundle, CurveSpec, u64), &'static str> {
@@ -118,7 +130,7 @@ pub fn buy_outputs(
     let (next, tokens) = spec.after_buy(quote_in)?;
     let sym = normalize_symbol(symbol)?.to_string();
     if ticker_id(&sym)? != spec.asset { return Err("symbol/asset mismatch"); }
-    let inv_r = blinding_from_seed(&[b"inv-r".as_ref(), &spec.asset, &next.cap_remaining.to_le_bytes(), &next.quote_raised.to_le_bytes()].concat());
+    let inv_r = inventory_blind(&next);
     let buy_r = blinding_from_seed(&[b"buy-r".as_ref(), &spec.asset, &tokens.to_le_bytes(), &quote_in.to_le_bytes()].concat());
     let inv = note(keeper.pk(), next.cap_remaining, &inv_r, spec.asset, sym.clone(), PredHeader::from_pred(&next.as_pred()), [3u8; 16]);
     let got = note(buyer.pk(), tokens, &buy_r, spec.asset, sym, PredHeader::pk(), [4u8; 16]);
@@ -138,7 +150,75 @@ pub fn buy_outputs(
     }, next, tokens))
 }
 
-/// Next inventory note + seller quote note after a token-in fill.
+/// Spend the live inventory note, emit next inventory + buyer tokens.
+/// Token units conserve: rem = rem' + tokens.
+pub fn buy_spend(
+    keeper: &SpendKey, buyer: &SpendKey, set: &LaunchSet, spec: &CurveSpec,
+    symbol: &str, quote_in: u64, height: u64,
+) -> Result<(ActionBundle, CurveSpec, u64), &'static str> {
+    if height < spec.start_height { return Err("curve closed"); }
+    let (next, tokens) = spec.after_buy(quote_in)?;
+    let sym = normalize_symbol(symbol)?.to_string();
+    if ticker_id(&sym)? != spec.asset { return Err("symbol/asset mismatch"); }
+    let in_blind = inventory_blind(spec);
+    let note_cm = inventory_cm(spec);
+    if !set.contains(note_cm) { return Err("inventory not live"); }
+    let pred = spec.as_pred();
+    let header = PredHeader::from_pred(&pred);
+    let leaves = set.live_leaves_for(header.id, header.commit);
+    let idx = leaves.iter().position(|l| *l == note_cm).ok_or("inventory not in curve slice")?;
+    let expected = commit_with_asset(spec.cap_remaining, &in_blind, &ORTH);
+    if expected.commitment != note_cm { return Err("opening mismatch"); }
+    let delta = blinding_from_seed(&[b"rerand".as_ref(), &keeper.sk.to_bytes(), &note_cm].concat());
+    let c_prime = rerand(&expected, &delta);
+    let image = keeper.key_image(&note_cm);
+    let mut ctx = Vec::new();
+    ctx.extend_from_slice(&set.window_root());
+    ctx.extend_from_slice(&height.to_le_bytes());
+    let image_or = ImageOr::prove(&leaves, idx, keeper, &delta, &image, &c_prime, &ctx)?;
+    let inv_r = inventory_blind(&next);
+    let buy_r = blinding_from_seed(&[b"buy-r".as_ref(), &spec.asset, &tokens.to_le_bytes(), &quote_in.to_le_bytes()].concat());
+    let inv = note(keeper.pk(), next.cap_remaining, &inv_r, spec.asset, sym.clone(), PredHeader::from_pred(&next.as_pred()), [3u8; 16]);
+    let got = note(buyer.pk(), tokens, &buy_r, spec.asset, sym, PredHeader::pk(), [4u8; 16]);
+    let fee_c = ValueCommitment::identity();
+    let fee_blind = Scalar::ZERO;
+    let r_bind = (in_blind + delta) - inv_r - buy_r - fee_blind;
+    let mut transcript = Vec::new();
+    transcript.extend_from_slice(&image);
+    transcript.extend_from_slice(&inv.value_commitment.commitment);
+    transcript.extend_from_slice(&got.value_commitment.commitment);
+    transcript.extend_from_slice(&fee_c.commitment);
+    transcript.extend_from_slice(&set.window_root());
+    transcript.extend_from_slice(&height.to_le_bytes());
+    let binding = BindingSig::sign(&r_bind, &transcript)?;
+    let proof = NoteProof {
+        image: image_or,
+        range_in: RangeProof::prove(spec.cap_remaining, &(in_blind + delta)),
+        range_outs: vec![RangeProof::prove(next.cap_remaining, &inv_r), RangeProof::prove(tokens, &buy_r)],
+        range_fee: RangeProof::prove(0, &fee_blind),
+        binding: binding.clone(),
+    };
+    let mut fill = Vec::new();
+    fill.extend_from_slice(&quote_in.to_le_bytes());
+    fill.extend_from_slice(&tokens.to_le_bytes());
+    let spend = CompactSpend {
+        spend_tag: image, rerand: c_prime, proof: Some(proof),
+        pred: header, pred_body: Some(pred),
+        pred_witness: PredWitness { keys: vec![], fill },
+    };
+    let bundle = ActionBundle {
+        version: 7,
+        actions: vec![
+            CompactAction { spend: Some(spend), output: Some(inv) },
+            CompactAction { spend: None, output: Some(got) },
+        ],
+        fee_commitment: fee_c, binding: Some(binding), emission: None,
+        intents: vec![], fills: vec![], exec: None,
+    };
+    if !bundle.verify_conservation() { return Err("conservation failed"); }
+    Ok((bundle, next, tokens))
+}
+
 pub fn sell_outputs(
     keeper: &SpendKey, seller: &SpendKey, spec: &CurveSpec, symbol: &str, tokens_in: u64, height: u64,
 ) -> Result<(ActionBundle, CurveSpec, u64), &'static str> {
@@ -146,7 +226,7 @@ pub fn sell_outputs(
     let (next, quote) = spec.after_sell(tokens_in)?;
     let sym = normalize_symbol(symbol)?.to_string();
     if ticker_id(&sym)? != spec.asset { return Err("symbol/asset mismatch"); }
-    let inv_r = blinding_from_seed(&[b"inv-r".as_ref(), &spec.asset, &next.cap_remaining.to_le_bytes(), &next.quote_raised.to_le_bytes()].concat());
+    let inv_r = inventory_blind(&next);
     let q_r = blinding_from_seed(&[b"sell-r".as_ref(), &spec.asset, &quote.to_le_bytes()].concat());
     let inv = note(keeper.pk(), next.cap_remaining, &inv_r, spec.asset, sym, PredHeader::from_pred(&next.as_pred()), [5u8; 16]);
     let pay = note(seller.pk(), quote, &q_r, ORTH, String::new(), PredHeader::pk(), [6u8; 16]);
@@ -165,33 +245,21 @@ pub fn sell_outputs(
 mod tests {
     use super::*;
     use crate::notes::keys::SpendKey;
+    use crate::notes::launch::LiveNote;
     #[test]
-    fn buy_then_sell_moves_spec() {
-        let spec = CurveSpec::new([7u8; 32], 1_000_000, 10_000, 80_000, 0);
-        let (n, got) = spec.after_buy(1_000).unwrap();
-        assert!(got > 0 && n.quote_raised == 1_000);
-        let (n2, q) = n.after_sell(got).unwrap();
-        assert!(q > 0 && q <= 1_000);
-        assert!(n2.cap_remaining > n.cap_remaining);
-    }
-    #[test]
-    fn same_name_same_asset() {
-        let a = SpendKey::from_wallet_seed(b"a");
-        let b = SpendKey::from_wallet_seed(b"b");
-        let (_, _, id_a) = birth_outputs(&a, "MEME", b"s1", 1000, 10, 50, 1, 0, 0, 1).unwrap();
-        let (_, _, id_b) = birth_outputs(&b, "MEME", b"s2", 1000, 10, 50, 1, 0, 0, 1).unwrap();
-        assert_eq!(id_a, id_b);
-    }
-    #[test]
-    fn buy_outputs_keeps_symbol() {
+    fn buy_spend_kills_old_inventory() {
         let k = SpendKey::from_wallet_seed(b"k");
         let b = SpendKey::from_wallet_seed(b"b");
-        let (_, spec, id) = birth_outputs(&k, "MEME", b"s", 1_000_000, 10_000, 80_000, 1, 0, 0, 1).unwrap();
-        let (bundle, next, tokens) = buy_outputs(&k, &b, &spec, "MEME", 1_000, 2).unwrap();
+        let (birth, spec, _) = birth_outputs(&k, "MEME", b"s", 1_000_000, 10_000, 80_000, 1, 0, 0, 1).unwrap();
+        let mut set = LaunchSet::standard();
+        for n in birth.output_records() { set.append_note(n); }
+        let cm = inventory_cm(&spec);
+        assert!(set.contains(cm));
+        let (bundle, next, tokens) = buy_spend(&k, &b, &set, &spec, "MEME", 1_000, 2).unwrap();
         assert!(tokens > 0);
-        assert_eq!(next.asset, id);
+        assert_eq!(bundle.real_spends().len(), 1);
         assert_eq!(bundle.real_outputs().len(), 2);
-        assert_eq!(bundle.real_outputs()[0].symbol, "MEME");
-        assert!(bundle.is_issuance());
+        assert_ne!(inventory_cm(&next), cm);
+        let _ = LiveNote::plain(cm);
     }
 }

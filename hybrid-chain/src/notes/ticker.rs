@@ -35,6 +35,7 @@ impl CurveSpec {
     }
     pub fn tokens_out(&self, quote_in: u64) -> Result<u64, &'static str> {
         if quote_in == 0 { return Err("zero buy"); }
+        if self.graduated() { return Err("graduated"); }
         let den = self.virtual_quote.checked_add(self.quote_raised).and_then(|x| x.checked_add(quote_in)).ok_or("curve den")?;
         let num = (self.cap_remaining as u128).checked_mul(quote_in as u128).ok_or("curve num")?;
         let out = (num / den as u128) as u64;
@@ -46,6 +47,23 @@ impl CurveSpec {
         let mut n = self.clone();
         n.quote_raised = n.quote_raised.saturating_add(quote_in);
         n.cap_remaining = n.cap_remaining.saturating_sub(got);
+        Ok((n, got))
+    }
+    pub fn quote_out(&self, tokens_in: u64) -> Result<u64, &'static str> {
+        let sold = self.cap.saturating_sub(self.cap_remaining);
+        if tokens_in == 0 || tokens_in > sold { return Err("sell exceeds sold"); }
+        let q = self.virtual_quote.saturating_add(self.quote_raised);
+        let den = self.cap_remaining.saturating_add(tokens_in);
+        if den == 0 { return Err("sell den"); }
+        let out = (q as u128 * tokens_in as u128 / den as u128) as u64;
+        if out == 0 || out > self.quote_raised { return Err("sell empty"); }
+        Ok(out)
+    }
+    pub fn after_sell(&self, tokens_in: u64) -> Result<(Self, u64), &'static str> {
+        let got = self.quote_out(tokens_in)?;
+        let mut n = self.clone();
+        n.quote_raised = n.quote_raised.saturating_sub(got);
+        n.cap_remaining = n.cap_remaining.saturating_add(tokens_in);
         Ok((n, got))
     }
     pub fn graduated(&self) -> bool { self.quote_raised >= self.graduate_quote }
@@ -91,16 +109,70 @@ pub fn birth_outputs(
     }, spec, asset))
 }
 
+/// Next inventory note + buyer token note after a quote-in fill.
+/// Does not re-register the symbol. Wallet must retire the previous inventory note.
+pub fn buy_outputs(
+    keeper: &SpendKey, buyer: &SpendKey, spec: &CurveSpec, symbol: &str, quote_in: u64, height: u64,
+) -> Result<(ActionBundle, CurveSpec, u64), &'static str> {
+    if height < spec.start_height { return Err("curve closed"); }
+    let (next, tokens) = spec.after_buy(quote_in)?;
+    let sym = normalize_symbol(symbol)?.to_string();
+    if ticker_id(&sym)? != spec.asset { return Err("symbol/asset mismatch"); }
+    let inv_r = blinding_from_seed(&[b"inv-r".as_ref(), &spec.asset, &next.cap_remaining.to_le_bytes(), &next.quote_raised.to_le_bytes()].concat());
+    let buy_r = blinding_from_seed(&[b"buy-r".as_ref(), &spec.asset, &tokens.to_le_bytes(), &quote_in.to_le_bytes()].concat());
+    let inv = note(keeper.pk(), next.cap_remaining, &inv_r, spec.asset, sym.clone(), PredHeader::from_pred(&next.as_pred()), [3u8; 16]);
+    let got = note(buyer.pk(), tokens, &buy_r, spec.asset, sym, PredHeader::pk(), [4u8; 16]);
+    let intent = Intent {
+        id: blinding_from_seed(&[b"buy-id".as_ref(), &spec.asset, &quote_in.to_le_bytes()]).to_bytes(),
+        want_asset: spec.asset, pay_asset: ORTH, expire_height: height.saturating_add(64), bound: next.as_pred().commit(),
+    };
+    let id = intent.id;
+    Ok((ActionBundle {
+        version: 7,
+        actions: vec![
+            CompactAction { spend: None, output: Some(inv) },
+            CompactAction { spend: None, output: Some(got) },
+        ],
+        fee_commitment: ValueCommitment::identity(), binding: None, emission: None,
+        intents: vec![intent], fills: vec![IntentFill { intent_id: id, action_index: 1 }], exec: None,
+    }, next, tokens))
+}
+
+/// Next inventory note + seller quote note after a token-in fill.
+pub fn sell_outputs(
+    keeper: &SpendKey, seller: &SpendKey, spec: &CurveSpec, symbol: &str, tokens_in: u64, height: u64,
+) -> Result<(ActionBundle, CurveSpec, u64), &'static str> {
+    let _ = height;
+    let (next, quote) = spec.after_sell(tokens_in)?;
+    let sym = normalize_symbol(symbol)?.to_string();
+    if ticker_id(&sym)? != spec.asset { return Err("symbol/asset mismatch"); }
+    let inv_r = blinding_from_seed(&[b"inv-r".as_ref(), &spec.asset, &next.cap_remaining.to_le_bytes(), &next.quote_raised.to_le_bytes()].concat());
+    let q_r = blinding_from_seed(&[b"sell-r".as_ref(), &spec.asset, &quote.to_le_bytes()].concat());
+    let inv = note(keeper.pk(), next.cap_remaining, &inv_r, spec.asset, sym, PredHeader::from_pred(&next.as_pred()), [5u8; 16]);
+    let pay = note(seller.pk(), quote, &q_r, ORTH, String::new(), PredHeader::pk(), [6u8; 16]);
+    Ok((ActionBundle {
+        version: 7,
+        actions: vec![
+            CompactAction { spend: None, output: Some(inv) },
+            CompactAction { spend: None, output: Some(pay) },
+        ],
+        fee_commitment: ValueCommitment::identity(), binding: None, emission: None,
+        intents: vec![], fills: vec![], exec: None,
+    }, next, quote))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::notes::asset::normalize_symbol;
     use crate::notes::keys::SpendKey;
     #[test]
-    fn curve_is_conservative() {
-        let spec = CurveSpec::new([7u8; 32], 1_000_000, 10_000, 50_000, 0);
-        let a = spec.tokens_out(1_000).unwrap();
-        assert!(spec.tokens_out(2_000).unwrap() > a);
+    fn buy_then_sell_moves_spec() {
+        let spec = CurveSpec::new([7u8; 32], 1_000_000, 10_000, 80_000, 0);
+        let (n, got) = spec.after_buy(1_000).unwrap();
+        assert!(got > 0 && n.quote_raised == 1_000);
+        let (n2, q) = n.after_sell(got).unwrap();
+        assert!(q > 0 && q <= 1_000);
+        assert!(n2.cap_remaining > n.cap_remaining);
     }
     #[test]
     fn same_name_same_asset() {
@@ -109,5 +181,17 @@ mod tests {
         let (_, _, id_a) = birth_outputs(&a, "MEME", b"s1", 1000, 10, 50, 1, 0, 0, 1).unwrap();
         let (_, _, id_b) = birth_outputs(&b, "MEME", b"s2", 1000, 10, 50, 1, 0, 0, 1).unwrap();
         assert_eq!(id_a, id_b);
+    }
+    #[test]
+    fn buy_outputs_keeps_symbol() {
+        let k = SpendKey::from_wallet_seed(b"k");
+        let b = SpendKey::from_wallet_seed(b"b");
+        let (_, spec, id) = birth_outputs(&k, "MEME", b"s", 1_000_000, 10_000, 80_000, 1, 0, 0, 1).unwrap();
+        let (bundle, next, tokens) = buy_outputs(&k, &b, &spec, "MEME", 1_000, 2).unwrap();
+        assert!(tokens > 0);
+        assert_eq!(next.asset, id);
+        assert_eq!(bundle.real_outputs().len(), 2);
+        assert_eq!(bundle.real_outputs()[0].symbol, "MEME");
+        assert!(bundle.is_issuance());
     }
 }

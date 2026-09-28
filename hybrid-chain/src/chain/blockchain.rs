@@ -42,18 +42,30 @@ pub(crate) fn verify_bundle_against(
     let mut ctx = Vec::new();
     ctx.extend_from_slice(&launch.window_root());
     ctx.extend_from_slice(&height.to_le_bytes());
-    for spend in bundle.real_spends() {
+    let outs: Vec<_> = bundle.real_outputs().into_iter().map(|o| o.value_commitment.clone()).collect();
+    if outs.is_empty() { return Err("spend missing output"); }
+    let spends = bundle.real_spends();
+    let multi = spends.len() > 1;
+    let mut transcript = Vec::new();
+    for s in &spends { transcript.extend_from_slice(&s.spend_tag); }
+    for o in &outs { transcript.extend_from_slice(&o.commitment); }
+    transcript.extend_from_slice(&bundle.fee_commitment.commitment);
+    transcript.extend_from_slice(&launch.window_root());
+    transcript.extend_from_slice(&height.to_le_bytes());
+    for spend in &spends {
         let proof = spend.proof.as_ref().ok_or("note proof required")?;
-        let outs: Vec<_> = bundle.real_outputs().into_iter().map(|o| o.value_commitment.clone()).collect();
-        if outs.is_empty() { return Err("spend missing output"); }
-        let mut transcript = Vec::new();
-        transcript.extend_from_slice(&spend.spend_tag);
-        for o in &outs { transcript.extend_from_slice(&o.commitment); }
-        transcript.extend_from_slice(&bundle.fee_commitment.commitment);
-        transcript.extend_from_slice(&launch.window_root());
-        transcript.extend_from_slice(&height.to_le_bytes());
-        if !proof.verify(&spend.spend_tag, &spend.rerand, &outs, &bundle.fee_commitment, launch, &ctx, &transcript, spend.pred.id, spend.pred.commit) {
-            return Err("note proof failed");
+        let ok = if multi {
+            proof.verify_open(&spend.spend_tag, &spend.rerand, &outs, &bundle.fee_commitment, launch, &ctx, spend.pred.id, spend.pred.commit)
+        } else {
+            proof.verify(&spend.spend_tag, &spend.rerand, &outs, &bundle.fee_commitment, launch, &ctx, &transcript, spend.pred.id, spend.pred.commit)
+        };
+        if !ok { return Err("note proof failed"); }
+    }
+    if multi {
+        let bind = bundle.binding.as_ref().ok_or("bundle binding required")?;
+        let rerands: Vec<_> = spends.iter().map(|s| s.rerand.clone()).collect();
+        if !bind.verify(&rerands, &outs, &bundle.fee_commitment, &transcript) {
+            return Err("bundle binding failed");
         }
     }
     bundle.verify_programs(height)?;

@@ -231,9 +231,9 @@ pub struct NoteProof {
 }
 
 impl NoteProof {
-    pub fn verify(
+    pub fn verify_open(
         &self, image: &[u8; 32], c_prime: &ValueCommitment, outputs: &[ValueCommitment],
-        fee: &ValueCommitment, launch: &LaunchSet, ctx: &[u8], transcript: &[u8],
+        fee: &ValueCommitment, launch: &LaunchSet, ctx: &[u8],
         pred_id: [u8; 32], pred_commit: [u8; 32],
     ) -> bool {
         if outputs.is_empty() || self.range_outs.len() != outputs.len() { return false; }
@@ -244,7 +244,16 @@ impl NoteProof {
         for (p, c) in self.range_outs.iter().zip(outputs.iter()) {
             if !p.verify(c) { return false; }
         }
-        self.range_fee.verify(fee) && self.binding.verify(&[c_prime.clone()], outputs, fee, transcript)
+        self.range_fee.verify(fee)
+    }
+
+    pub fn verify(
+        &self, image: &[u8; 32], c_prime: &ValueCommitment, outputs: &[ValueCommitment],
+        fee: &ValueCommitment, launch: &LaunchSet, ctx: &[u8], transcript: &[u8],
+        pred_id: [u8; 32], pred_commit: [u8; 32],
+    ) -> bool {
+        self.verify_open(image, c_prime, outputs, fee, launch, ctx, pred_id, pred_commit)
+            && self.binding.verify(&[c_prime.clone()], outputs, fee, transcript)
     }
 }
 

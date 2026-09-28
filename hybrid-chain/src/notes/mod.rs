@@ -30,5 +30,5 @@ pub use proof::NoteProof;
 pub use pred::{PredHeader, Predicate};
 pub use asset::{AssetBook, ORTH};
 pub use spend::{emission_bundle, transfer_window_bundle};
-pub use ticker::{birth_outputs, CurveSpec};
+pub use ticker::{birth_outputs, buy_outputs, sell_outputs, CurveSpec};
 pub use tags::SpendTagSet;

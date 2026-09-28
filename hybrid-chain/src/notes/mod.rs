@@ -5,6 +5,7 @@ pub mod asset;
 pub mod auth;
 pub mod commitment;
 pub mod epoch;
+pub mod flow;
 pub mod intent;
 pub mod keys;
 pub mod launch;

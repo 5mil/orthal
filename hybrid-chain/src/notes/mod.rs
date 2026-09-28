@@ -32,5 +32,5 @@ pub use pred::{PredHeader, Predicate};
 pub use asset::{AssetBook, ORTH};
 pub use spend::{emission_bundle, transfer_window_bundle};
 pub use ticker::{birth_outputs, buy_outputs, buy_spend, inventory_cm, sell_outputs, CurveSpec};
-pub use trade::{genesis_vault, sell_spend, vault_cm};
+pub use trade::{buy_fund, genesis_vault, sell_spend, vault_cm, with_genesis_vault};
 pub use tags::SpendTagSet;

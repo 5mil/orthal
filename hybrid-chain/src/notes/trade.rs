@@ -36,6 +36,11 @@ pub fn genesis_vault(keeper: &SpendKey, spec: &CurveSpec) -> CompactOutput {
     out(keeper, spec.quote_raised, &vault_blind(spec), ORTH, String::new(), PredHeader::from_pred(&spec.as_pred()), [8u8; 16])
 }
 
+pub fn with_genesis_vault(mut bundle: ActionBundle, keeper: &SpendKey, spec: &CurveSpec) -> ActionBundle {
+    bundle.actions.push(CompactAction { spend: None, output: Some(genesis_vault(keeper, spec)) });
+    bundle
+}
+
 struct Leg {
     sk: SpendKey,
     cm: [u8; 32],
@@ -45,9 +50,8 @@ struct Leg {
 }
 
 fn prove_leg(
-    leg: &Leg, set: &LaunchSet, height: u64, ctx: &[u8],
-    outs: &[ValueCommitment], fee: &ValueCommitment, dummy_bind: &BindingSig,
-) -> Result<(CompactSpend, Scalar, ValueCommitment), &'static str> {
+    leg: &Leg, set: &LaunchSet, ctx: &[u8], dummy_bind: &BindingSig,
+) -> Result<(CompactSpend, Scalar), &'static str> {
     if !set.contains(leg.cm) { return Err("leg not live"); }
     let header = PredHeader::from_pred(&leg.pred);
     let leaves = set.live_leaves_for(header.id, header.commit);
@@ -58,9 +62,6 @@ fn prove_leg(
     let c_prime = rerand(&expected, &delta);
     let image = leg.sk.key_image(&leg.cm);
     let image_or = ImageOr::prove(&leaves, idx, &leg.sk, &delta, &image, &c_prime, ctx)?;
-    let ranges: Vec<RangeProof> = outs.iter().map(|_| RangeProof::prove(0, &Scalar::ZERO)).collect();
-    // range_outs on each leg are checked against real outputs; fill properly at caller.
-    let _ = ranges;
     let proof = NoteProof {
         image: image_or,
         range_in: RangeProof::prove(leg.value, &(leg.blind + delta)),
@@ -68,28 +69,81 @@ fn prove_leg(
         range_fee: RangeProof::prove(0, &Scalar::ZERO),
         binding: dummy_bind.clone(),
     };
-    let _ = fee;
     Ok((CompactSpend {
         spend_tag: image, rerand: c_prime, proof: Some(proof),
         pred: header, pred_body: if header.is_default() { None } else { Some(leg.pred.clone()) },
         pred_witness: PredWitness::none(),
-    }, delta, c_prime))
+    }, delta))
 }
 
-fn finish_proofs(
-    spends: &mut [CompactSpend], values_blinds: &[(u64, Scalar)],
-    out_vals: &[(u64, Scalar)], fee: &ValueCommitment,
-) {
+fn finish_proofs(spends: &mut [CompactSpend], out_vals: &[(u64, Scalar)], binding: &BindingSig) {
     let range_outs: Vec<RangeProof> = out_vals.iter().map(|(v, r)| RangeProof::prove(*v, r)).collect();
     let range_fee = RangeProof::prove(0, &Scalar::ZERO);
-    for (s, (v, r)) in spends.iter_mut().zip(values_blinds.iter()) {
+    for s in spends.iter_mut() {
         if let Some(p) = s.proof.as_mut() {
             p.range_outs = range_outs.clone();
             p.range_fee = range_fee.clone();
-            let _ = v; let _ = r;
+            p.binding = binding.clone();
         }
     }
-    let _ = fee;
+}
+
+fn transcript(tags: &[[u8; 32]], outs: &[ValueCommitment], fee: &ValueCommitment, set: &LaunchSet, height: u64) -> Vec<u8> {
+    let mut t = Vec::new();
+    for tag in tags { t.extend_from_slice(tag); }
+    for o in outs { t.extend_from_slice(&o.commitment); }
+    t.extend_from_slice(&fee.commitment);
+    t.extend_from_slice(&set.window_root());
+    t.extend_from_slice(&height.to_le_bytes());
+    t
+}
+
+/// Spend inventory + vault + buyer ORTH. Emit next inventory, next vault, buyer tokens.
+pub fn buy_fund(
+    keeper: &SpendKey, buyer: &SpendKey, set: &LaunchSet, spec: &CurveSpec,
+    symbol: &str, quote_in: u64, height: u64,
+    buyer_orth_cm: [u8; 32], buyer_orth_blind: Scalar,
+) -> Result<(ActionBundle, CurveSpec, u64), &'static str> {
+    if height < spec.start_height { return Err("curve closed"); }
+    let (next, tokens) = spec.after_buy(quote_in)?;
+    let sym = normalize_symbol(symbol)?.to_string();
+    if ticker_id(&sym)? != spec.asset { return Err("symbol/asset mismatch"); }
+    let inv = Leg { sk: keeper.clone(), cm: inventory_cm(spec), value: spec.cap_remaining, blind: inventory_blind(spec), pred: spec.as_pred() };
+    let vault = Leg { sk: keeper.clone(), cm: vault_cm(spec), value: spec.quote_raised, blind: vault_blind(spec), pred: spec.as_pred() };
+    let pay = Leg { sk: buyer.clone(), cm: buyer_orth_cm, value: quote_in, blind: buyer_orth_blind, pred: Predicate::Pk };
+    let mut ctx = Vec::new();
+    ctx.extend_from_slice(&set.window_root());
+    ctx.extend_from_slice(&height.to_le_bytes());
+    let inv_r = inventory_blind(&next);
+    let v_r = vault_blind(&next);
+    let tok_r = blinding_from_seed(&[b"buy-r".as_ref(), &spec.asset, &tokens.to_le_bytes(), &quote_in.to_le_bytes()].concat());
+    let o_inv = out(keeper, next.cap_remaining, &inv_r, spec.asset, sym.clone(), PredHeader::from_pred(&next.as_pred()), [3u8; 16]);
+    let o_vault = out(keeper, next.quote_raised, &v_r, ORTH, String::new(), PredHeader::from_pred(&next.as_pred()), [8u8; 16]);
+    let o_tok = out(buyer, tokens, &tok_r, spec.asset, sym, PredHeader::pk(), [4u8; 16]);
+    let outs = vec![o_inv.value_commitment.clone(), o_vault.value_commitment.clone(), o_tok.value_commitment.clone()];
+    let fee = ValueCommitment::identity();
+    let dummy = BindingSig::sign(&blinding_from_seed(b"dummy-bind-nonzero"), b"tmp")?;
+    let (s0, d0) = prove_leg(&inv, set, &ctx, &dummy)?;
+    let (s1, d1) = prove_leg(&vault, set, &ctx, &dummy)?;
+    let (s2, d2) = prove_leg(&pay, set, &ctx, &dummy)?;
+    let r_bind = (inv.blind + d0) + (vault.blind + d1) + (pay.blind + d2) - inv_r - v_r - tok_r;
+    let tags = [s0.spend_tag, s1.spend_tag, s2.spend_tag];
+    let tr = transcript(&tags, &outs, &fee, set, height);
+    let binding = BindingSig::sign(&r_bind, &tr)?;
+    let mut spends = vec![s0, s1, s2];
+    finish_proofs(&mut spends, &[(next.cap_remaining, inv_r), (next.quote_raised, v_r), (tokens, tok_r)], &binding);
+    let bundle = ActionBundle {
+        version: 7,
+        actions: vec![
+            CompactAction { spend: Some(spends.remove(0)), output: Some(o_inv) },
+            CompactAction { spend: Some(spends.remove(0)), output: Some(o_vault) },
+            CompactAction { spend: Some(spends.remove(0)), output: Some(o_tok) },
+        ],
+        fee_commitment: fee, binding: Some(binding), emission: None,
+        intents: vec![], fills: vec![], exec: None,
+    };
+    if !bundle.verify_conservation() { return Err("conservation failed"); }
+    Ok((bundle, next, tokens))
 }
 
 /// Spend inventory + vault + seller tokens. Pay quote ORTH from the vault.
@@ -117,24 +171,15 @@ pub fn sell_spend(
     let outs = vec![o_inv.value_commitment.clone(), o_vault.value_commitment.clone(), o_pay.value_commitment.clone()];
     let fee = ValueCommitment::identity();
     let dummy = BindingSig::sign(&blinding_from_seed(b"dummy-bind-nonzero"), b"tmp")?;
-    let (s0, d0, _) = prove_leg(&inv, set, height, &ctx, &outs, &fee, &dummy)?;
-    let (s1, d1, _) = prove_leg(&vault, set, height, &ctx, &outs, &fee, &dummy)?;
-    let (s2, d2, _) = prove_leg(&tok, set, height, &ctx, &outs, &fee, &dummy)?;
+    let (s0, d0) = prove_leg(&inv, set, &ctx, &dummy)?;
+    let (s1, d1) = prove_leg(&vault, set, &ctx, &dummy)?;
+    let (s2, d2) = prove_leg(&tok, set, &ctx, &dummy)?;
     let r_bind = (inv.blind + d0) + (vault.blind + d1) + (tok.blind + d2) - inv_r - v_r - q_r;
-    let mut transcript = Vec::new();
-    transcript.extend_from_slice(&s0.spend_tag);
-    transcript.extend_from_slice(&s1.spend_tag);
-    transcript.extend_from_slice(&s2.spend_tag);
-    for o in &outs { transcript.extend_from_slice(&o.commitment); }
-    transcript.extend_from_slice(&fee.commitment);
-    transcript.extend_from_slice(&set.window_root());
-    transcript.extend_from_slice(&height.to_le_bytes());
-    let binding = BindingSig::sign(&r_bind, &transcript)?;
+    let tags = [s0.spend_tag, s1.spend_tag, s2.spend_tag];
+    let tr = transcript(&tags, &outs, &fee, set, height);
+    let binding = BindingSig::sign(&r_bind, &tr)?;
     let mut spends = vec![s0, s1, s2];
-    finish_proofs(&mut spends, &[(inv.value, inv.blind + d0), (vault.value, vault.blind + d1), (tok.value, tok.blind + d2)], &[(next.cap_remaining, inv_r), (next.quote_raised, v_r), (quote, q_r)], &fee);
-    for s in spends.iter_mut() {
-        if let Some(p) = s.proof.as_mut() { p.binding = binding.clone(); }
-    }
+    finish_proofs(&mut spends, &[(next.cap_remaining, inv_r), (next.quote_raised, v_r), (quote, q_r)], &binding);
     let bundle = ActionBundle {
         version: 7,
         actions: vec![

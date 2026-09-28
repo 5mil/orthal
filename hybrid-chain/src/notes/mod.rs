@@ -19,6 +19,7 @@ pub mod spend;
 pub mod stake;
 pub mod tags;
 pub mod ticker;
+pub mod trade;
 pub mod tree;
 
 pub use action::{ActionBundle, CompactAction, CompactOutput, CompactSpend};
@@ -31,4 +32,5 @@ pub use pred::{PredHeader, Predicate};
 pub use asset::{AssetBook, ORTH};
 pub use spend::{emission_bundle, transfer_window_bundle};
 pub use ticker::{birth_outputs, buy_outputs, buy_spend, inventory_cm, sell_outputs, CurveSpec};
+pub use trade::{genesis_vault, sell_spend, vault_cm};
 pub use tags::SpendTagSet;

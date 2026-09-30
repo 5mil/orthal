@@ -15,6 +15,11 @@ pub struct ChainParams {
     pub initial_difficulty: u32,
     pub genesis_timestamp: i64,
     pub genesis_message: &'static str,
+    pub asert_half_life: i64,
+    pub max_future_drift: i64,
+    pub mtp_window: usize,
+    pub min_pow_bits: u32,
+    pub max_pow_bits: u32,
 }
 
 pub const CHAIN_PARAMS: ChainParams = ChainParams {
@@ -33,4 +38,9 @@ pub const CHAIN_PARAMS: ChainParams = ChainParams {
     initial_difficulty: 12,
     genesis_timestamp: 1748996400,
     genesis_message: "Orthal genesis — compact notes, native ORTH",
+    asert_half_life: 2 * 24 * 3600,
+    max_future_drift: 2 * 3600,
+    mtp_window: 11,
+    min_pow_bits: 8,
+    max_pow_bits: 240,
 };

@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use crate::consensus::difficulty::{bits_of, meets_target, target_from_bits, Target};
 
 pub fn sha256d(data: &[u8]) -> [u8; 32] {
     let first = Sha256::digest(data);
@@ -6,30 +7,27 @@ pub fn sha256d(data: &[u8]) -> [u8; 32] {
     second.into()
 }
 
+/// Legacy bit-count check. Prefer `meets_target`.
 pub fn meets_difficulty(hash: &[u8; 32], difficulty: u32) -> bool {
-    let difficulty = difficulty.min(256);
-    let full_bytes = (difficulty / 8) as usize;
-    let remainder_bits = difficulty % 8;
-    for i in 0..full_bytes {
-        if hash[i] != 0 { return false; }
-    }
-    if remainder_bits > 0 && full_bytes < 32 {
-        let mask = 0xFF_u8 << (8 - remainder_bits);
-        if hash[full_bytes] & mask != 0 { return false; }
-    }
-    true
+    meets_target(hash, &target_from_bits(difficulty))
 }
 
-pub fn mine(header_prefix: &[u8], difficulty: u32) -> (u64, [u8; 32]) {
+pub fn mine_target(header_prefix: &[u8], target: &Target) -> (u64, [u8; 32]) {
     let mut nonce: u64 = 0;
     loop {
         let mut data = header_prefix.to_vec();
         data.extend_from_slice(&nonce.to_le_bytes());
         let hash = sha256d(&data);
-        if meets_difficulty(&hash, difficulty) { return (nonce, hash); }
+        if meets_target(&hash, target) { return (nonce, hash); }
         nonce = nonce.wrapping_add(1);
     }
 }
+
+pub fn mine(header_prefix: &[u8], difficulty: u32) -> (u64, [u8; 32]) {
+    mine_target(header_prefix, &target_from_bits(difficulty))
+}
+
+pub fn display_bits(target: &Target) -> u32 { bits_of(target) }
 
 #[cfg(test)]
 mod tests {

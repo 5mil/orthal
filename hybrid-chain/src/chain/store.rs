@@ -1,6 +1,7 @@
 use crate::chain::block::{Block, BlockType};
 use crate::chain::blockchain::Blockchain;
-use crate::consensus::pow::{meets_difficulty, sha256d};
+use crate::consensus::difficulty::{asert, genesis_target, meets_target};
+use crate::consensus::pow::sha256d;
 use crate::notes::launch::LaunchSet;
 use crate::notes::tags::SpendTagSet;
 use crate::params::CHAIN_PARAMS;
@@ -12,6 +13,9 @@ use std::path::Path;
 pub struct ChainSnapshot {
     pub blocks: Vec<Block>,
     pub current_difficulty: u32,
+    pub pow_target: [u8; 32],
+    pub chain_work: [u8; 32],
+    pub pow_count: u64,
     pub total_supply: u64,
 }
 
@@ -27,6 +31,9 @@ impl Blockchain {
         ChainSnapshot {
             blocks: self.blocks.clone(),
             current_difficulty: self.current_difficulty,
+            pow_target: self.pow_target,
+            chain_work: self.chain_work,
+            pow_count: self.pow_count,
             total_supply: self.total_supply,
         }
     }
@@ -55,6 +62,9 @@ impl Blockchain {
             blocks: Vec::new(),
             block_index: Default::default(),
             current_difficulty: snap.current_difficulty,
+            pow_target: snap.pow_target,
+            chain_work: snap.chain_work,
+            pow_count: snap.pow_count,
             total_supply: snap.total_supply,
             launch: LaunchSet::standard(),
             tags: SpendTagSet::new(),
@@ -75,6 +85,8 @@ impl Blockchain {
         }
         let mut launch = LaunchSet::standard();
         let mut tags = SpendTagSet::new();
+        let mut pow_count = 0u64;
+        let mut last_pow_ts = i64::MIN;
         for (i, block) in self.blocks.iter().enumerate() {
             if block.header.height != i as u64 {
                 return Err(StoreError::Invalid(format!("height mismatch at {i}")));
@@ -86,18 +98,36 @@ impl Blockchain {
                 if block.header.prev_hash != [0u8; 32] {
                     return Err(StoreError::Invalid("bad genesis prev".into()));
                 }
+                if block.header.target != genesis_target() {
+                    return Err(StoreError::Invalid("bad genesis target".into()));
+                }
             } else if block.header.prev_hash != self.blocks[i - 1].hash() {
                 return Err(StoreError::Invalid(format!("bad parent at {i}")));
             }
             if block.header.block_type == BlockType::PoW {
+                if i > 0 && block.header.timestamp <= last_pow_ts {
+                    return Err(StoreError::Invalid(format!("timestamp not after MTP parent at {i}")));
+                }
                 let bytes = bincode::serialize(&block.header).map_err(|e| StoreError::Decode(e.to_string()))?;
                 let hash = sha256d(&bytes);
                 if hash != block.hash() {
                     return Err(StoreError::Invalid(format!("hash mismatch at {i}")));
                 }
-                if i > 0 && !meets_difficulty(&hash, block.header.difficulty) {
+                if i > 0 && !meets_target(&hash, &block.header.target) {
                     return Err(StoreError::Invalid(format!("weak work at {i}")));
                 }
+                if i > 0 {
+                    let expected = asert(
+                        genesis_target(),
+                        block.header.timestamp.saturating_sub(CHAIN_PARAMS.genesis_timestamp),
+                        pow_count.max(1),
+                    );
+                    if expected != block.header.target {
+                        return Err(StoreError::Invalid(format!("asert mismatch at {i}")));
+                    }
+                }
+                last_pow_ts = last_pow_ts.max(block.header.timestamp);
+                pow_count += 1;
             }
             let reward = if block.header.block_type == BlockType::PoW {
                 Some(pow_reward_at_height(block.header.height))

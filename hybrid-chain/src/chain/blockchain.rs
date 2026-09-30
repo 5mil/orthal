@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use chrono::Utc;
 use crate::chain::block::{Block, BlockHeader, BlockType};
-use crate::consensus::pow;
-use crate::consensus::difficulty;
+use crate::consensus::difficulty::{self, add_work, asert, bits_of, genesis_target, work_from_target, Target};
+use crate::consensus::pow::{self, meets_target};
 use crate::notes::action::ActionBundle;
 use crate::notes::asset::{AssetBook, TickerRecord, ticker_id};
 use crate::notes::launch::LaunchSet;
@@ -77,6 +77,9 @@ pub struct Blockchain {
     pub blocks: Vec<Block>,
     pub block_index: HashMap<[u8; 32], usize>,
     pub current_difficulty: u32,
+    pub pow_target: Target,
+    pub chain_work: [u8; 32],
+    pub pow_count: u64,
     pub total_supply: u64,
     pub launch: LaunchSet,
     pub tags: SpendTagSet,
@@ -89,6 +92,9 @@ impl Blockchain {
             blocks: Vec::new(),
             block_index: HashMap::new(),
             current_difficulty: CHAIN_PARAMS.initial_difficulty,
+            pow_target: genesis_target(),
+            chain_work: [0u8; 32],
+            pow_count: 0,
             total_supply: 0,
             launch: LaunchSet::standard(),
             tags: SpendTagSet::new(),
@@ -127,15 +133,41 @@ impl Blockchain {
         self.append_bundle(bundle, false, None, h)
     }
 
+    fn pow_headers(&self) -> impl Iterator<Item = &BlockHeader> {
+        self.blocks.iter().filter(|b| b.header.block_type == BlockType::PoW).map(|b| &b.header)
+    }
+
+    pub fn median_pow_time(&self) -> i64 {
+        let mut ts: Vec<i64> = self.pow_headers().map(|h| h.timestamp).rev().take(CHAIN_PARAMS.mtp_window).collect();
+        if ts.is_empty() { return CHAIN_PARAMS.genesis_timestamp; }
+        ts.sort_unstable();
+        ts[ts.len() / 2]
+    }
+
+    fn clamp_timestamp(&self, proposed: i64) -> i64 {
+        let mtp = self.median_pow_time();
+        let max = proposed.saturating_add(CHAIN_PARAMS.max_future_drift);
+        proposed.max(mtp + 1).min(max)
+    }
+
+    fn next_pow_target(&self, next_ts: i64) -> Target {
+        let genesis_ts = self.blocks.first().map(|b| b.header.timestamp).unwrap_or(CHAIN_PARAMS.genesis_timestamp);
+        let intervals = self.pow_count.saturating_sub(1);
+        asert(genesis_target(), next_ts.saturating_sub(genesis_ts), intervals.max(1))
+    }
+
     fn create_genesis(&mut self) {
         let pay = SealedPayout::from_wallet_seed(b"genesis-wallet", 0);
         let bundle = emission_bundle(&pay.spend, &pay.scan, 0, CHAIN_PARAMS.pow_block_reward, [0u8; 16]);
         self.append_bundle(&bundle, true, Some(CHAIN_PARAMS.pow_block_reward), 0).expect("genesis");
         let compact = vec![bundle];
+        let target = genesis_target();
+        let work = work_from_target(&target);
         let header = BlockHeader {
-            version: 4, height: 0, prev_hash: [0u8; 32],
+            version: 5, height: 0, prev_hash: [0u8; 32],
             merkle_root: Block::compute_merkle_root(&compact),
-            timestamp: CHAIN_PARAMS.genesis_timestamp, difficulty: self.current_difficulty,
+            timestamp: CHAIN_PARAMS.genesis_timestamp,
+            difficulty: bits_of(&target), target, chain_work: work,
             block_type: BlockType::PoW, nonce: 0, stake_modifier: [0u8; 32],
             notes_root: self.launch.commitment(), tags_root: self.tags.root(),
         };
@@ -143,6 +175,10 @@ impl Blockchain {
         let hash = genesis.hash();
         self.block_index.insert(hash, 0);
         self.total_supply += CHAIN_PARAMS.pow_block_reward;
+        self.pow_target = target;
+        self.chain_work = work;
+        self.pow_count = 1;
+        self.current_difficulty = bits_of(&target);
         self.blocks.push(genesis);
     }
 
@@ -160,10 +196,13 @@ impl Blockchain {
         self.append_bundle(&bundle, true, Some(reward), height).expect("emission");
         let mut compact = extra;
         compact.push(bundle);
+        let ts = self.clamp_timestamp(Utc::now().timestamp());
+        let target = self.next_pow_target(ts);
+        let work = add_work(self.chain_work, work_from_target(&target));
         let mut header = BlockHeader {
-            version: 4, height, prev_hash: self.tip_hash(),
+            version: 5, height, prev_hash: self.tip_hash(),
             merkle_root: Block::compute_merkle_root(&compact),
-            timestamp: Utc::now().timestamp(), difficulty: self.current_difficulty,
+            timestamp: ts, difficulty: bits_of(&target), target, chain_work: work,
             block_type: BlockType::PoW, nonce: 0, stake_modifier: [0u8; 32],
             notes_root: self.launch.commitment(), tags_root: self.tags.root(),
         };
@@ -171,15 +210,18 @@ impl Blockchain {
         loop {
             header.nonce = nonce;
             let hash = pow::sha256d(&bincode::serialize(&header).unwrap_or_default());
-            if pow::meets_difficulty(&hash, self.current_difficulty) { break; }
+            if meets_target(&hash, &target) { break; }
             nonce = nonce.wrapping_add(1);
         }
         let block = Block { header, compact };
         let block_hash = block.hash();
         self.block_index.insert(block_hash, self.blocks.len());
         self.total_supply += reward;
+        self.pow_target = target;
+        self.chain_work = work;
+        self.pow_count += 1;
+        self.current_difficulty = bits_of(&target);
         self.blocks.push(block.clone());
-        self.maybe_retarget();
         block
     }
 
@@ -200,10 +242,12 @@ impl Blockchain {
         let bundle = emission_bundle(&payout.spend, &payout.scan, height, reward, [9u8; 16]);
         self.append_bundle(&bundle, true, Some(reward), height)?;
         let compact = vec![bundle];
+        let ts = Utc::now().timestamp().max(self.median_pow_time() + 1);
         let header = BlockHeader {
-            version: 4, height, prev_hash: self.tip_hash(),
+            version: 5, height, prev_hash: self.tip_hash(),
             merkle_root: Block::compute_merkle_root(&compact),
-            timestamp: Utc::now().timestamp(), difficulty: self.current_difficulty,
+            timestamp: ts, difficulty: self.current_difficulty,
+            target: self.pow_target, chain_work: self.chain_work,
             block_type: BlockType::PoS, nonce: 0, stake_modifier: [0u8; 32],
             notes_root: self.launch.commitment(), tags_root: self.tags.root(),
         };
@@ -221,22 +265,13 @@ impl Blockchain {
         CHAIN_PARAMS.pow_block_reward >> halvings
     }
 
-    fn maybe_retarget(&mut self) {
-        let window = CHAIN_PARAMS.difficulty_adjustment_window;
-        if self.height() % window == 0 && self.height() > 0 {
-            let window_start = (self.height() - window) as usize;
-            let first_ts = self.blocks[window_start].header.timestamp;
-            let last_ts = self.blocks.last().unwrap().header.timestamp;
-            let actual = (last_ts - first_ts).max(1) as u64;
-            let target = difficulty::pow_target_timespan();
-            self.current_difficulty = difficulty::retarget(self.current_difficulty, actual, target);
-        }
-    }
-
     pub fn rebuild_notes(&mut self) -> Result<(), &'static str> {
         self.launch = LaunchSet::standard();
         self.tags = SpendTagSet::new();
         self.assets = AssetBook::new();
+        self.pow_count = 0;
+        self.chain_work = [0u8; 32];
+        self.pow_target = genesis_target();
         for block in &self.blocks {
             let reward = if block.header.block_type == BlockType::PoW {
                 Some(pow_reward_at_height(block.header.height))
@@ -253,6 +288,25 @@ impl Blockchain {
             }
             if block.header.notes_root != self.launch.commitment() {
                 return Err("notes_root mismatch");
+            }
+            if block.header.block_type == BlockType::PoW {
+                if block.header.height > 0 {
+                    let expected = asert(
+                        genesis_target(),
+                        block.header.timestamp.saturating_sub(CHAIN_PARAMS.genesis_timestamp),
+                        self.pow_count.max(1),
+                    );
+                    if expected != block.header.target {
+                        return Err("asert target mismatch");
+                    }
+                }
+                self.pow_target = block.header.target;
+                self.chain_work = add_work(self.chain_work, work_from_target(&block.header.target));
+                if block.header.chain_work != self.chain_work {
+                    return Err("chain_work mismatch");
+                }
+                self.pow_count += 1;
+                self.current_difficulty = bits_of(&self.pow_target);
             }
         }
         Ok(())

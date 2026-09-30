@@ -13,6 +13,8 @@ pub struct BlockHeader {
     pub merkle_root: [u8; 32],
     pub timestamp: i64,
     pub difficulty: u32,
+    pub target: [u8; 32],
+    pub chain_work: [u8; 32],
     pub block_type: BlockType,
     pub nonce: u64,
     pub stake_modifier: [u8; 32],

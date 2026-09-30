@@ -11,68 +11,34 @@ Lab mirror: [5mil/solana:dev](https://github.com/5mil/solana/tree/dev).
 mine ORTH  →  birth + vault  →  buy_fund  →  sell_spend  →  graduate_spend
 ```
 
-## What you can do with it
+## Consensus
 
-| You want | You use |
-| --- | --- |
-| A mineable coin named ORTH | `mine_pow_with_payout(ticket, &wallet, extra)` |
-| A named ticker that cannot be cloned | `birth_outputs` + `AssetBook`. Symbol unique forever |
-| An empty quote vault at birth | `with_genesis_vault` |
-| A buy that deposits ORTH | `buy_fund` (inventory + vault + buyer ORTH) |
-| A sell that pays from deposits | `sell_spend` (inventory + vault + seller tokens) |
-| A fair / locked / deep launch | `LaunchPreset::{fair, locked_team, deep}` |
-| Off-node matching | `IntentBoard` (one leg must be ORTH) |
-| Graduate the curve | `graduate_spend` → two `PoolLp` notes |
-| Time locks, multisig, swaps | Listed predicates on the note |
-| A node that refuses a bad file | `--data` then `--replay` |
-
-## Native unit
-
-Orthal / **ORTH** / 21,000,000 cap / 50 ORTH PoW subsidy / 120s PoW, 60s PoS.
-`ORTH` cannot be issued as a ticker (`asset = [0u8; 32]`).
-
-PoW difficulty `d` is leading-zero bits on `SHA256d(header)`. Genesis `d = 12`.
-Every 2016 blocks the node compares the window to `2016 × 120s`, clamps the
-span to `[T/4, 4T]`, and steps `d` by the number of doublings (2× fast → +1 bit).
-Floor 12, cap 240.
-
-## Issued tickers
-
-Asset id is `sha256d("orthal-ticker" ‖ SYMBOL)`. `A–Z0–9`, length 1–12.
-The same name always hashes to the same id. A later fill of that id is a
-refill, not a second asset.
-
-Curve (virtual product):
+PoW uses a 256-bit **target** on header v5. A header is valid when
+`SHA256d(header) ≤ target`. The next PoW target is ASERT against genesis:
 
 ```text
-tokens_out = rem × q_in / (virtual + raised + q_in)
+next = genesis_target × 2^((t - t0 - n·τ) / half_life)
 ```
 
-Raised ORTH lives in a **vault note**. Sells cannot mint quote. After
-`quote_raised >= graduate_quote`, `buy` refuses and `graduate_spend` converts
-inventory + vault into `PoolLp` notes.
+`τ = 120s`, half-life = 2 days. Samples are **PoW-only**. Timestamps must beat
+the median of the last 11 PoW times. Accumulated `chain_work` is the fork-choice
+key. PoS mint does not change the PoW target and adds no work.
 
-Helpers: `notes/market.rs` (`preview_buy`, presets, `IntentBoard`).
-On-chain path: `notes/trade.rs`, `notes/graduate.rs`.
-Flow test: `cargo test mine_birth_buy_sell`.
+Set `genesis_timestamp` to the real launch instant before a public pin.
 
-## Programs
+## Tickers and programs
 
-Listed predicates only: `Pk`, `PkN`, `After`, `And`/`Or`, `Rate`, `Swap`,
-`PoolLp`, `Curve`, `Ticker`. Unknown ids fail closed. No bytecode VM.
-See [PROGRAM.md](PROGRAM.md).
+See the tables in the previous README revision: unique symbols, vault-backed
+curve, listed predicates. Helpers live in `notes/trade.rs`, `notes/graduate.rs`,
+`notes/market.rs`.
 
 ## Build
 
 ```bash
 git clone --branch main https://github.com/5mil/orthal.git
 cd orthal/hybrid-chain
-cargo fmt --all -- --check
 cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
 cargo run --release -- --data /tmp/orthal/chain.bin
-cargo run --release -- --data /tmp/orthal/chain.bin --replay
 ```
 
-Operator pin and Discord: [LAUNCH.md](LAUNCH.md).
-Living-set notes: [NOTES.md](NOTES.md).
+Operator pin: [LAUNCH.md](LAUNCH.md).

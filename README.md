@@ -2,20 +2,28 @@
 
 **Repo:** [github.com/5mil/orthal](https://github.com/5mil/orthal) (`main`)
 **Crate:** [`hybrid-chain`](hybrid-chain/)
-**Ticker:** ORTH
-**Integration source:** [5mil/solana:dev](https://github.com/5mil/solana/tree/dev)
+**Unit:** ORTH
+**Lab mirror:** [5mil/solana:dev](https://github.com/5mil/solana/tree/dev)
 
-Orthal is a hybrid SHA256d PoW / coin-age PoS chain. Transfers, miner
-payouts, issued tickers, and predicate programs share one compact action
-bundle. There is no token-factory VM.
-
-Start here: **[hybrid-chain/README.md](hybrid-chain/README.md)**
+Hybrid SHA256d PoW / coin-age PoS. Transfers, miner payouts, issued tickers,
+and listed predicates share one compact `ActionBundle`. There is no token-factory VM.
 
 ```text
-mine ORTH → birth a unique ticker → trade the curve → graduate to an LP note
+mine ORTH → birth a unique ticker → buy_fund / sell_spend → graduate to PoolLp
 ```
 
-- Symbols are unique forever. Asset id is `H(symbol)`. `ORTH` is reserved.
-- Programs are listed predicates (`Pk`, `After`, `PkN`, `Curve`, `Swap`, …).
-  Unknown ids fail closed.
-- Persistence: `--data DIR` then `--replay`. A tampered file does not load.
+Developer start:
+
+1. [hybrid-chain/README.md](hybrid-chain/README.md) — product surface
+2. [hybrid-chain/LAUNCH.md](hybrid-chain/LAUNCH.md) — pin, mine, persist, Discord
+3. [hybrid-chain/PROGRAM.md](hybrid-chain/PROGRAM.md) — predicates and intents
+4. [hybrid-chain/NOTES.md](hybrid-chain/NOTES.md) — living set and conservation
+
+```bash
+git clone --branch main https://github.com/5mil/orthal.git
+cd orthal/hybrid-chain
+cargo test --all-targets
+cargo test mine_birth_buy_sell -- --nocapture
+```
+
+Testnet only. Range proofs are a 48-bit prototype. Relay is in-process.

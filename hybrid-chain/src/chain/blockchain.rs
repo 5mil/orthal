@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use chrono::Utc;
 use crate::chain::block::{Block, BlockHeader, BlockType};
-use crate::consensus::difficulty::{self, add_work, asert, bits_of, genesis_target, work_from_target, Target};
+use crate::consensus::difficulty::{add_work, asert, bits_of, genesis_target, work_from_target, Target};
 use crate::consensus::pow::{self, meets_target};
 use crate::notes::action::ActionBundle;
 use crate::notes::asset::{AssetBook, TickerRecord, ticker_id};
@@ -152,8 +152,7 @@ impl Blockchain {
 
     fn next_pow_target(&self, next_ts: i64) -> Target {
         let genesis_ts = self.blocks.first().map(|b| b.header.timestamp).unwrap_or(CHAIN_PARAMS.genesis_timestamp);
-        let intervals = self.pow_count.saturating_sub(1);
-        asert(genesis_target(), next_ts.saturating_sub(genesis_ts), intervals.max(1))
+        asert(genesis_target(), next_ts.saturating_sub(genesis_ts), self.pow_count.max(1))
     }
 
     fn create_genesis(&mut self) {

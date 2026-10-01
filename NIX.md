@@ -5,8 +5,8 @@ Pin: `github:NixOS/nixpkgs/nixos-25.05`.
 
 `hybrid-chain/Cargo.lock` is part of the pin. Do not gitignore it.
 
-First machine with Nix should run `nix flake lock` and commit `flake.lock`
-so every later build uses the same nixpkgs revision.
+`flake.lock` is committed. It pins `nixpkgs` to `nixos-25.05` at the revision in that file.
+Do not delete it. Update it with `nix flake update` in a dedicated commit.
 
 ## Layout
 
@@ -72,7 +72,6 @@ loop exists.
 
 ## What is still out of scope
 
-- No committed `flake.lock` until the first `nix flake lock`.
 - No long-running peer process, so no socket activation and no open port.
 - Wallet seeds are not a Nix secret. Keep them off the store.
 - PoS mint is not a service path.

@@ -1,8 +1,9 @@
 /target
 **/*/target
-Cargo.lock
 *.bin
 data/
 .idea/
 .vscode/
 *.swp
+result
+.direnv

@@ -6,4 +6,5 @@ data/
 .vscode/
 *.swp
 result
+result-*
 .direnv

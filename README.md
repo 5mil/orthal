@@ -19,7 +19,7 @@ Developer start:
 3. [hybrid-chain/PROGRAM.md](hybrid-chain/PROGRAM.md) — predicates and intents
 4. [hybrid-chain/NOTES.md](hybrid-chain/NOTES.md) — living set and conservation
 
-Nix: [NIX.md](NIX.md). `nix develop` then `cargo test`, or `nix build` for `hybrid-node`.
+Nix: [NIX.md](NIX.md). `nix develop`, `nix build`, `nix flake check`. Overlay and hardened oneshot module included.
 
 ```bash
 git clone --branch main https://github.com/5mil/orthal.git

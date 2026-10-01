@@ -1,5 +1,5 @@
 {
-  description = "Orthal hybrid-node — Nix build and dev shell";
+  description = "Orthal hybrid-node";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
 
@@ -7,41 +7,51 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAll = f: nixpkgs.lib.genAttrs systems (system:
-        f (import nixpkgs { inherit system; }));
+        f (import nixpkgs { inherit system; overlays = [ self.overlays.default ]; }));
     in {
-      packages = forAll (pkgs: rec {
-        hybrid-node = pkgs.rustPlatform.buildRustPackage {
-          pname = "hybrid-node";
-          version = "0.1.0";
-          src = ./hybrid-chain;
-          cargoLock.lockFile = ./hybrid-chain/Cargo.lock;
-          doCheck = true;
-          meta = {
-            description = "Orthal hybrid PoW/PoS node";
-            mainProgram = "hybrid-node";
-          };
+      overlays.default = import ./nix/overlay.nix;
+
+      packages = forAll (pkgs: {
+        hybrid-node = pkgs.hybrid-node;
+        default = pkgs.hybrid-node;
+      });
+
+      apps = forAll (pkgs: {
+        hybrid-node = {
+          type = "app";
+          program = "${pkgs.hybrid-node}/bin/hybrid-node";
         };
-        default = hybrid-node;
+        default = self.apps.${pkgs.stdenv.hostPlatform.system}.hybrid-node;
+      });
+
+      checks = forAll (pkgs: {
+        hybrid-node = pkgs.hybrid-node;
+      } // nixpkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        nixos-oneshot = import ./nix/test.nix { inherit self pkgs; };
       });
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
+          inputsFrom = [ pkgs.hybrid-node ];
           packages = with pkgs; [
             rustc
             cargo
             rustfmt
             clippy
+            rust-analyzer
             pkg-config
+            alejandra
           ];
           shellHook = ''
-            echo "orthal dev shell — crate is hybrid-chain/"
-            echo "  cargo test --all-targets"
-            echo "  nix build"
+            echo "orthal: cd hybrid-chain && cargo test --all-targets"
+            echo "        nix build   |   nix flake check   |   nix run"
           '';
         };
       });
 
-      nixosModules.orthal = import ./nix/module.nix;
+      formatter = forAll (pkgs: pkgs.alejandra);
+
+      nixosModules.orthal = ./nix/module.nix;
       nixosModules.default = self.nixosModules.orthal;
     };
 }

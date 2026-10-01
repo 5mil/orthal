@@ -1,52 +1,78 @@
 # Nix
 
-Build and shell for `hybrid-chain`. Pin is `nixos-25.05`.
+Reproducible build, dev shell, overlay, and NixOS unit for `hybrid-chain`.
+Pin: `github:NixOS/nixpkgs/nixos-25.05`.
 
-`Cargo.lock` is committed. Nix will not build without it. Do not gitignore it again.
+`hybrid-chain/Cargo.lock` is part of the pin. Do not gitignore it.
 
-## Shell
+First machine with Nix should run `nix flake lock` and commit `flake.lock`
+so every later build uses the same nixpkgs revision.
+
+## Layout
+
+| Path | Role |
+| --- | --- |
+| `flake.nix` | packages, apps, checks, devShell, formatter, module |
+| `nix/package.nix` | `buildRustPackage`, `doCheck = true` |
+| `nix/overlay.nix` | `pkgs.hybrid-node` |
+| `nix/module.nix` | hardened oneshot systemd unit |
+| `nix/test.nix` | NixOS VM check (Linux only) |
+| `.github/workflows/nix.yml` | `nix build` and `nix flake check` |
+
+## Commands
 
 ```bash
 nix develop
-cd hybrid-chain
-cargo test --all-targets
+nix build                  # ./result/bin/hybrid-node
+nix run -- --data /tmp/orthal/chain.bin
+nix flake check            # package tests + NixOS oneshot on Linux
+nix fmt
 ```
 
-## Package
+Inside the shell:
 
 ```bash
-nix build
-./result/bin/hybrid-node --data /tmp/orthal/chain.bin
-./result/bin/hybrid-node --data /tmp/orthal/chain.bin --replay
+cd hybrid-chain
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
 ```
 
-`nix build` runs `cargo test` (`doCheck = true`). Header v5 snapshots only.
+Header v5 snapshots only. A pre-ASERT `chain.bin` will not load.
 
 ## NixOS
 
 ```nix
 {
   inputs.orthal.url = "github:5mil/orthal";
-  outputs = { orthal, nixpkgs, ... }: {
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+
+  outputs = { self, orthal, nixpkgs }: {
     nixosConfigurations.host = nixpkgs.lib.nixosSystem {
       modules = [
         orthal.nixosModules.orthal
-        ({ pkgs, ... }: {
-          nixpkgs.overlays = [
-            (_: _: { hybrid-node = orthal.packages.${pkgs.system}.default; })
-          ];
+        {
           services.orthal.enable = true;
-        })
+          # optional: services.orthal.replay = true;
+        }
       ];
     };
   };
 }
 ```
 
-The unit is `Type = oneshot`. The binary mines one block or replays and exits. A resident peer loop is not in the crate yet.
+The unit is `Type = oneshot` and `DynamicUser`. It mines one block or
+replays, then exits. `dataFile` must stay under `/var/lib/orthal`.
+Do not pass a wallet seed in `extraArgs`; unit files are world-readable
+on many systems.
 
-## What this does not do
+Hardening: no new privileges, strict system, no home, no network
+(`AF_UNIX` only — the binary does not dial peers), syscall filter,
+memory not executable. Drop the address-family restriction when a peer
+loop exists.
 
-- No flake lock until the first `nix flake lock` on a machine with Nix.
-- No cross-compiled miner.
-- No secret management. Wallet seeds stay out of the Nix store.
+## What is still out of scope
+
+- No committed `flake.lock` until the first `nix flake lock`.
+- No long-running peer process, so no socket activation and no open port.
+- Wallet seeds are not a Nix secret. Keep them off the store.
+- PoS mint is not a service path.
